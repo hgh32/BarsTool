@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Text;
 
 namespace BarsTool;
@@ -5,6 +6,7 @@ namespace BarsTool;
 public class BarsFile
 {
     public ushort Version { get; set; } = 0x0101;
+    public bool IsBigEndian { get; set; } = false;
     public List<BarsAsset> Assets { get; set; } = [];
 
     public static BarsFile Read(string path) => Read(File.ReadAllBytes(path));
@@ -12,18 +14,28 @@ public class BarsFile
     public static BarsFile Read(byte[] data)
     {
         using var ms = new MemoryStream(data);
-        using var reader = new BinaryReader(ms, Encoding.UTF8);
+        using var reader = new DataReader(ms);
 
-        uint magic = reader.ReadUInt32();
-        if (magic != 0x53524142) // "BARS"
+        string magic = Encoding.ASCII.GetString(reader.ReadBytes(4));
+        if (magic != "BARS")
             throw new InvalidDataException("Not a valid BARS file.");
 
         int fileSize = reader.ReadInt32();
         ushort bom = reader.ReadUInt16();
-        if (bom != 0xFEFF)
-            throw new InvalidDataException($"Unexpected BOM: 0x{bom:X4}");
-
+        
         var bars = new BarsFile();
+
+        if (bom == 0xFFFE)
+        {
+            reader.IsBigEndian = true;
+            bars.IsBigEndian = true;
+            fileSize = BinaryPrimitives.ReverseEndianness(fileSize);
+        }
+        else if (bom != 0xFEFF)
+        {
+            throw new InvalidDataException($"Unexpected BOM: 0x{bom:X4}");
+        }
+
         bars.Version = reader.ReadUInt16();
 
         int assetCount = reader.ReadInt32();
@@ -44,7 +56,7 @@ public class BarsFile
         {
             var asset = new BarsAsset { Hash = hashes[i] };
 
-            int amtaTotalSize = BitConverter.ToInt32(data, amtaOffsets[i] + 8);
+            int amtaTotalSize = bars.IsBigEndian ? BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(amtaOffsets[i] + 8)) : BinaryPrimitives.ReadInt32LittleEndian(data.AsSpan(amtaOffsets[i] + 8));
             try
             {
                 asset.Amta = AmtaFile.Read(data, amtaOffsets[i], amtaTotalSize);
@@ -77,7 +89,7 @@ public class BarsFile
 
         var amtaBytesList = new byte[assetCount][];
         for (int i = 0; i < assetCount; i++)
-            amtaBytesList[i] = sorted[i].Amta!.BuildNew();
+            amtaBytesList[i] = sorted[i].Amta!.BuildNew(IsBigEndian);
 
         var amtaPositions = new int[assetCount];
         int pos = headerSize;
@@ -105,11 +117,11 @@ public class BarsFile
         int fileSize = pos;
 
         using var ms = new MemoryStream(fileSize);
-        using var writer = new BinaryWriter(ms, Encoding.UTF8);
+        using var writer = new DataWriter(ms, IsBigEndian);
 
         writer.Write(Encoding.ASCII.GetBytes("BARS"));
         writer.Write(fileSize);
-        writer.Write((ushort)0xFEFF);
+        writer.Write((ushort)(IsBigEndian ? 0xFEFF : 0xFEFF));
         writer.Write(Version);
         writer.Write(assetCount);
 

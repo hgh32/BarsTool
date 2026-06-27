@@ -168,22 +168,25 @@ static int HandleBarsList(string[] args)
 
         case "create":
         {
-            if (args.Length < 4) { Console.Error.WriteLine("Usage: BarsTool barslist create <output.barslist> --name <name> <entry1.bars> [...]"); return 1; }
+            if (args.Length < 4) { Console.Error.WriteLine("Usage: BarsTool barslist create <output.barslist> --name <name> <entry1.bars> [...] [--big-endian]"); return 1; }
             string output = args[1];
             string? listName = null;
             var entries = new List<string>();
+            bool isBigEndian = false;
 
             for (int i = 2; i < args.Length; i++)
             {
                 if (args[i] == "--name" && i + 1 < args.Length)
                     listName = args[++i];
+                else if (args[i] == "--big-endian")
+                    isBigEndian = true;
                 else
                     entries.Add(args[i]);
             }
 
             if (listName == null) { Console.Error.WriteLine("--name is required."); return 1; }
 
-            var bl = new BarsListFile { Name = listName, Entries = entries };
+            var bl = new BarsListFile { Name = listName, Entries = entries, IsBigEndian = isBigEndian };
             bl.Save(output);
             Console.WriteLine($"Created {output} with {entries.Count} entries.");
             return 0;
@@ -223,12 +226,13 @@ static int HandleBars(string[] args)
 
         case "add":
         {
-            if (args.Length < 3) { Console.Error.WriteLine("Usage: BarsTool bars add <file.bars> [audio|folder ...] [--name <name>] [--stream] [--waves <dir>] [--streams <dir>]"); return 1; }
+            if (args.Length < 3) { Console.Error.WriteLine("Usage: BarsTool bars add <file.bars> [audio|folder ...] [--name <name>] [--stream] [--waves <dir>] [--streams <dir>] [--big-endian]"); return 1; }
             string barsPath = args[1];
             string? explicitName = null;
             string? streamsDir = null;
             string? wavesDir = null;
             bool treatAsStream = false;
+            bool isBigEndian = false;
             var audioPaths = new List<string>();
 
             for (int i = 2; i < args.Length; i++)
@@ -241,11 +245,13 @@ static int HandleBars(string[] args)
                     wavesDir = args[++i];
                 else if (args[i] == "--stream")
                     treatAsStream = true;
+                else if (args[i] == "--big-endian")
+                    isBigEndian = true;
                 else
                     audioPaths.Add(args[i]);
             }
 
-            var bars = File.Exists(barsPath) ? BarsFile.Read(barsPath) : new BarsFile();
+            var bars = File.Exists(barsPath) ? BarsFile.Read(barsPath) : new BarsFile { IsBigEndian = isBigEndian };
 
             var resolvedPaths = ResolveAudioPaths(audioPaths, treatAsStream);
             foreach (string audioPath in resolvedPaths)
@@ -261,7 +267,7 @@ static int HandleBars(string[] args)
                     if (ext == ".wav")
                     {
                         Console.WriteLine($"Converting {Path.GetFileName(audioPath)} to BFSTM...");
-                        fileData = BfstmFile.ConvertFromWav(File.ReadAllBytes(audioPath));
+                        fileData = BfstmFile.ConvertFromWav(File.ReadAllBytes(audioPath), false, 0, 0, bars.IsBigEndian);
                     }
                     else
                         fileData = File.ReadAllBytes(audioPath);
@@ -275,15 +281,17 @@ static int HandleBars(string[] args)
                         var info = BfstmFile.ReadInfo(fileData);
                         byte[] bfstp = BfstmFile.GenerateBfstp(fileData);
                         var amta = AmtaFile.CreateFromBfstm(assetName, info, fileData);
+                        amta.IsBigEndian = bars.IsBigEndian;
                         bars.AddAudio(assetName, amta, bfstp);
                     }
                     Console.WriteLine($"Added stream '{assetName}'");
                 }
                 else
                 {
-                    byte[] bfwavData = LoadAsBfwav(audioPath);
+                    byte[] bfwavData = LoadAsBfwav(audioPath, bars.IsBigEndian);
                     var bfwavInfo = BfwavFile.ReadInfo(bfwavData);
                     var amta = AmtaFile.CreateFromBfwav(assetName, bfwavInfo, bfwavData);
+                    amta.IsBigEndian = bars.IsBigEndian;
                     bars.AddAudio(assetName, amta, bfwavData);
                     Console.WriteLine($"Added '{assetName}'");
                 }
@@ -296,9 +304,10 @@ static int HandleBars(string[] args)
                 foreach (string wavePath in waveFiles)
                 {
                     string assetName = Path.GetFileNameWithoutExtension(wavePath);
-                    byte[] bfwavData = LoadAsBfwav(wavePath);
+                    byte[] bfwavData = LoadAsBfwav(wavePath, bars.IsBigEndian);
                     var bfwavInfo = BfwavFile.ReadInfo(bfwavData);
                     var amta = AmtaFile.CreateFromBfwav(assetName, bfwavInfo, bfwavData);
+                    amta.IsBigEndian = bars.IsBigEndian;
                     bars.AddAudio(assetName, amta, bfwavData);
                     Console.WriteLine($"Added '{assetName}'");
                 }
@@ -317,7 +326,7 @@ static int HandleBars(string[] args)
                     if (ext == ".wav")
                     {
                         Console.WriteLine($"Converting {Path.GetFileName(streamPath)} to BFSTM...");
-                        fileData = BfstmFile.ConvertFromWav(File.ReadAllBytes(streamPath));
+                        fileData = BfstmFile.ConvertFromWav(File.ReadAllBytes(streamPath), false, 0, 0, bars.IsBigEndian);
                     }
                     else if (ext == ".bfstm")
                     {
@@ -328,6 +337,7 @@ static int HandleBars(string[] args)
                     var info = BfstmFile.ReadInfo(fileData);
                     byte[] bfstp = BfstmFile.GenerateBfstp(fileData);
                     var amta = AmtaFile.CreateFromBfstm(assetName, info, fileData);
+                    amta.IsBigEndian = bars.IsBigEndian;
                     bars.AddAudio(assetName, amta, bfstp);
                     Console.WriteLine($"Added stream '{assetName}'");
                 }
@@ -340,12 +350,13 @@ static int HandleBars(string[] args)
 
         case "create":
         {
-            if (args.Length < 2) { Console.Error.WriteLine("Usage: BarsTool bars create <output.bars> [audio|folder ...] [--names n1,n2,...] [--waves <dir>] [--streams <dir>]"); return 1; }
+            if (args.Length < 2) { Console.Error.WriteLine("Usage: BarsTool bars create <output.bars> [audio|folder ...] [--names n1,n2,...] [--waves <dir>] [--streams <dir>] [--big-endian]"); return 1; }
             string output = args[1];
             var audioPaths = new List<string>();
             string[]? names = null;
             string? streamsDir = null;
             string? wavesDir = null;
+            bool isBigEndian = false;
 
             for (int i = 2; i < args.Length; i++)
             {
@@ -355,11 +366,13 @@ static int HandleBars(string[] args)
                     streamsDir = args[++i];
                 else if (args[i] == "--waves" && i + 1 < args.Length)
                     wavesDir = args[++i];
+                else if (args[i] == "--big-endian")
+                    isBigEndian = true;
                 else
                     audioPaths.Add(args[i]);
             }
 
-            var bars = new BarsFile();
+            var bars = new BarsFile { IsBigEndian = isBigEndian };
             var resolvedPaths = ResolveAudioPaths(audioPaths, false);
 
             for (int i = 0; i < resolvedPaths.Count; i++)
@@ -374,14 +387,16 @@ static int HandleBars(string[] args)
                     var info = BfstmFile.ReadInfo(bfstmData);
                     byte[] bfstp = BfstmFile.GenerateBfstp(bfstmData);
                     var amta = AmtaFile.CreateFromBfstm(assetName, info, bfstmData);
+                    amta.IsBigEndian = isBigEndian;
                     bars.AddAudio(assetName, amta, bfstp);
                     Console.WriteLine($"Added stream '{assetName}'");
                 }
                 else
                 {
-                    byte[] bfwavData = LoadAsBfwav(audioPath);
+                    byte[] bfwavData = LoadAsBfwav(audioPath, isBigEndian);
                     var bfwavInfo = BfwavFile.ReadInfo(bfwavData);
                     var amta = AmtaFile.CreateFromBfwav(assetName, bfwavInfo, bfwavData);
+                    amta.IsBigEndian = isBigEndian;
                     bars.AddAudio(assetName, amta, bfwavData);
                     Console.WriteLine($"Added '{assetName}'");
                 }
@@ -394,9 +409,10 @@ static int HandleBars(string[] args)
                 foreach (string wavePath in waveFiles)
                 {
                     string assetName = Path.GetFileNameWithoutExtension(wavePath);
-                    byte[] bfwavData = LoadAsBfwav(wavePath);
+                    byte[] bfwavData = LoadAsBfwav(wavePath, isBigEndian);
                     var bfwavInfo = BfwavFile.ReadInfo(bfwavData);
                     var amta = AmtaFile.CreateFromBfwav(assetName, bfwavInfo, bfwavData);
+                    amta.IsBigEndian = isBigEndian;
                     bars.AddAudio(assetName, amta, bfwavData);
                     Console.WriteLine($"Added '{assetName}'");
                 }
@@ -415,7 +431,7 @@ static int HandleBars(string[] args)
                     if (ext == ".wav")
                     {
                         Console.WriteLine($"Converting {Path.GetFileName(streamPath)} to BFSTM...");
-                        fileData = BfstmFile.ConvertFromWav(File.ReadAllBytes(streamPath));
+                        fileData = BfstmFile.ConvertFromWav(File.ReadAllBytes(streamPath), false, 0, 0, isBigEndian);
                     }
                     else if (ext == ".bfstm")
                         fileData = File.ReadAllBytes(streamPath);
@@ -424,6 +440,7 @@ static int HandleBars(string[] args)
                     var info = BfstmFile.ReadInfo(fileData);
                     byte[] bfstp = BfstmFile.GenerateBfstp(fileData);
                     var amta = AmtaFile.CreateFromBfstm(assetName, info, fileData);
+                    amta.IsBigEndian = isBigEndian;
                     bars.AddAudio(assetName, amta, bfstp);
                     Console.WriteLine($"Added stream '{assetName}'");
                 }
@@ -555,7 +572,7 @@ static int PrintBarsListUsage()
       list    <file.barslist>                                List entries
       add     <file.barslist> <name.bars> [name2.bars ...]   Add entries
       remove  <file.barslist> <name.bars>                    Remove an entry
-      create  <output.barslist> --name <name> <entry1.bars> [...]  Create new
+      create  <output.barslist> --name <name> <entry1.bars> [...] [--big-endian]  Create new
     """);
     return 1;
 }
@@ -567,15 +584,16 @@ static int PrintBarsUsage()
 
     Subcommands:
       list    <file.bars>                                              List assets
-      add     <file.bars> [audio|folder ...] [--name <n>] [--stream] [--waves <dir>] [--streams <dir>]
+      add     <file.bars> [audio|folder ...] [--name <n>] [--stream] [--waves <dir>] [--streams <dir>] [--big-endian]
       remove  <file.bars> <asset_name>                                Remove an asset
-      create  <output.bars> [audio|folder ...] [--names n1,n2,...] [--waves <dir>] [--streams <dir>]
+      create  <output.bars> [audio|folder ...] [--names n1,n2,...] [--waves <dir>] [--streams <dir>] [--big-endian]
       extract <file.bars> [--output <dir>] [--wav] [--streams-dir <dir>]
 
     Paths can be .wav, .bfwav, .bfstm files, or folders.
     WAV files are auto-converted. BFSTM files generate BFSTP + AMTA.
-    --waves <dir>    Add WAV/BFWAV files from dir as wave assets
-    --streams <dir>  Add BFSTM/WAV files from dir as stream assets
+    --waves <dir>      Add WAV/BFWAV files from dir as wave assets
+    --streams <dir>    Add BFSTM/WAV files from dir as stream assets
+    --big-endian       Create or add to the file in Big Endian mode
     """);
     return 1;
 }
@@ -612,7 +630,7 @@ static List<string> ResolveAudioPaths(List<string> inputs, bool includeStreams)
     return result;
 }
 
-static byte[] LoadAsBfwav(string audioPath)
+static byte[] LoadAsBfwav(string audioPath, bool isBigEndian = false)
 {
     byte[] audioData = File.ReadAllBytes(audioPath);
     string ext = Path.GetExtension(audioPath).ToLowerInvariant();
@@ -620,7 +638,7 @@ static byte[] LoadAsBfwav(string audioPath)
     if (ext == ".wav")
     {
         Console.WriteLine($"Converting {Path.GetFileName(audioPath)} to BFWAV...");
-        return BfwavFile.ConvertFromWav(audioData);
+        return BfwavFile.ConvertFromWav(audioData, isBigEndian);
     }
     if (ext == ".bfwav")
         return audioData;

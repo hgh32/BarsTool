@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Text;
 using VGAudio.Containers;
 using VGAudio.Containers.NintendoWare;
@@ -30,41 +31,72 @@ public static class BfstmFile
 
     public static BfstmInfo ReadInfo(byte[] data)
     {
-        string magic = Encoding.ASCII.GetString(data, 0, 4);
+        using var ms = new MemoryStream(data);
+        using var reader = new DataReader(ms);
+
+        string magic = Encoding.ASCII.GetString(reader.ReadBytes(4));
         if (magic != "FSTM" && magic != "FSTP")
             throw new InvalidDataException($"Not a BFSTM/BFSTP file (got '{magic}').");
 
-        int numBlocks = BitConverter.ToUInt16(data, 16);
+        ushort bom = reader.ReadUInt16();
+        if (bom == 0xFFFE)
+            reader.IsBigEndian = true;
+        else if (bom != 0xFEFF)
+            throw new InvalidDataException($"Unexpected BOM: 0x{bom:X4}");
+
+        reader.BaseStream.Position = 16;
+        int numBlocks = reader.ReadUInt16();
+
         int infoOff = -1;
-        int pos = 20;
+        reader.BaseStream.Position = 20;
         for (int i = 0; i < numBlocks; i++)
         {
-            ushort blkType = BitConverter.ToUInt16(data, pos);
-            int blkOff = BitConverter.ToInt32(data, pos + 4);
+            ushort blkType = reader.ReadUInt16();
+            reader.ReadUInt16(); // padding
+            int blkOff = reader.ReadInt32();
             if (blkType == 0x4000) infoOff = blkOff;
-            pos += 12;
+            reader.ReadInt32(); // size
         }
 
         if (infoOff < 0) throw new InvalidDataException("INFO block not found.");
 
-        int stmInfoRefOff = BitConverter.ToInt32(data, infoOff + 8 + 4);
-        int si = infoOff + 8 + stmInfoRefOff;
+        reader.BaseStream.Position = infoOff + 8 + 4;
+        int stmInfoRefOff = reader.ReadInt32();
+        
+        long si = infoOff + 8 + stmInfoRefOff;
+        reader.BaseStream.Position = si;
+
+        byte codec = reader.ReadByte();
+        bool isLooped = reader.ReadByte() != 0;
+        int channelCount = reader.ReadByte();
+        reader.ReadByte(); // padding
+        int sampleRate = reader.ReadInt32();
+        int loopStart = reader.ReadInt32();
+        int sampleCount = reader.ReadInt32();
+        int sampleBlockCount = reader.ReadInt32();
+        int sampleBlockSize = reader.ReadInt32();
+        int sampleBlockSampleCount = reader.ReadInt32();
+        int lastBlockSize = reader.ReadInt32();
+        int lastBlockSampleCount = reader.ReadInt32();
+        int lastBlockPadSize = reader.ReadInt32();
+        int seekSize = reader.ReadInt32();
+        int seekIntervalSampleCount = reader.ReadInt32();
 
         return new BfstmInfo(
-            SampleRate: BitConverter.ToInt32(data, si + 4),
-            SampleCount: BitConverter.ToInt32(data, si + 12),
-            ChannelCount: data[si + 2],
-            IsLooped: data[si + 1] != 0,
-            LoopStart: BitConverter.ToInt32(data, si + 8),
-            Codec: data[si],
-            SampleBlockCount: BitConverter.ToInt32(data, si + 16),
-            SampleBlockSize: BitConverter.ToInt32(data, si + 20),
-            SampleBlockSampleCount: BitConverter.ToInt32(data, si + 24),
-            LastBlockSize: BitConverter.ToInt32(data, si + 28),
-            LastBlockSampleCount: BitConverter.ToInt32(data, si + 32),
-            LastBlockPadSize: BitConverter.ToInt32(data, si + 36),
-            SeekSize: BitConverter.ToInt32(data, si + 40),
-            SeekIntervalSampleCount: BitConverter.ToInt32(data, si + 44)
+            SampleRate: sampleRate,
+            SampleCount: sampleCount,
+            ChannelCount: channelCount,
+            IsLooped: isLooped,
+            LoopStart: loopStart,
+            Codec: codec,
+            SampleBlockCount: sampleBlockCount,
+            SampleBlockSize: sampleBlockSize,
+            SampleBlockSampleCount: sampleBlockSampleCount,
+            LastBlockSize: lastBlockSize,
+            LastBlockSampleCount: lastBlockSampleCount,
+            LastBlockPadSize: lastBlockPadSize,
+            SeekSize: seekSize,
+            SeekIntervalSampleCount: seekIntervalSampleCount
         );
     }
 
@@ -79,14 +111,14 @@ public static class BfstmFile
         return outStream.ToArray();
     }
 
-    public static byte[] ConvertFromWav(byte[] wavData, bool loop = false, int loopStart = 0, int loopEnd = 0)
+    public static byte[] ConvertFromWav(byte[] wavData, bool loop = false, int loopStart = 0, int loopEnd = 0, bool isBigEndian = false)
     {
         var wavReader = new WaveReader();
         using var ms = new MemoryStream(wavData);
         var audioData = wavReader.Read(ms);
 
         var writer = new BCFstmWriter(NwTarget.Cafe);
-        writer.Configuration.Endianness = VGAudio.Utilities.Endianness.LittleEndian;
+        writer.Configuration.Endianness = isBigEndian ? VGAudio.Utilities.Endianness.BigEndian : VGAudio.Utilities.Endianness.LittleEndian;
         writer.Configuration.Version = new NwVersion(5, 0, 0, 0);
         writer.Configuration.SamplesPerSeekTableEntry = 0x3800;
         writer.Configuration.SamplesPerInterleave = 0x3800;
@@ -110,8 +142,10 @@ public static class BfstmFile
         using var readMs = new MemoryStream(bfstmData);
         AudioWithConfig awc = reader.ReadWithConfig(readMs);
 
+        bool isBigEndian = BitConverter.ToUInt16(bfstmData, 4) == 0xFFFE;
         var writer = new BCFstmWriter(NwTarget.Cafe);
-        writer.Configuration.Endianness = VGAudio.Utilities.Endianness.LittleEndian;
+        writer.Configuration.Endianness = isBigEndian ? VGAudio.Utilities.Endianness.BigEndian : VGAudio.Utilities.Endianness.LittleEndian;
+        
         writer.Configuration.Version = new NwVersion(5, 0, 0, 0);
         writer.Configuration.SamplesPerSeekTableEntry = 0x3800;
         writer.Configuration.SamplesPerInterleave = 0x3800;
@@ -129,15 +163,22 @@ public static class BfstmFile
             throw new InvalidDataException("Input must be a BFSTM file.");
 
         int numBlocks = BitConverter.ToUInt16(bfstmData, 16);
+        // We probably should read the BOM to determine if it's BigEndian for GenerateBfstp too.
+        bool isBigEndian = BitConverter.ToUInt16(bfstmData, 4) == 0xFFFE;
+        
+        ushort ReadUInt16(int offset) => isBigEndian ? BinaryPrimitives.ReadUInt16BigEndian(bfstmData.AsSpan(offset)) : BinaryPrimitives.ReadUInt16LittleEndian(bfstmData.AsSpan(offset));
+        int ReadInt32(int offset) => isBigEndian ? BinaryPrimitives.ReadInt32BigEndian(bfstmData.AsSpan(offset)) : BinaryPrimitives.ReadInt32LittleEndian(bfstmData.AsSpan(offset));
+
+        numBlocks = ReadUInt16(16);
 
         int infoOff = -1, infoSize = -1;
         int dataOff = -1;
         int pos = 20;
         for (int i = 0; i < numBlocks; i++)
         {
-            ushort blkType = BitConverter.ToUInt16(bfstmData, pos);
-            int blkOff = BitConverter.ToInt32(bfstmData, pos + 4);
-            int blkSize = BitConverter.ToInt32(bfstmData, pos + 8);
+            ushort blkType = ReadUInt16(pos);
+            int blkOff = ReadInt32(pos + 4);
+            int blkSize = ReadInt32(pos + 8);
             if (blkType == 0x4000) { infoOff = blkOff; infoSize = blkSize; }
             if (blkType == 0x4002) { dataOff = blkOff; }
             pos += 12;
@@ -149,10 +190,10 @@ public static class BfstmFile
         byte[] infoBlock = new byte[infoSize];
         Array.Copy(bfstmData, infoOff, infoBlock, 0, infoSize);
 
-        int stmInfoRefOff = BitConverter.ToInt32(infoBlock, 8 + 4);
+        int stmInfoRefOff = isBigEndian ? BinaryPrimitives.ReadInt32BigEndian(infoBlock.AsSpan(8 + 4)) : BinaryPrimitives.ReadInt32LittleEndian(infoBlock.AsSpan(8 + 4));
         int stmInfoPos = 8 + stmInfoRefOff;
         int channels = infoBlock[stmInfoPos + 2];
-        int sampleBlkSize = BitConverter.ToInt32(infoBlock, stmInfoPos + 20);
+        int sampleBlkSize = isBigEndian ? BinaryPrimitives.ReadInt32BigEndian(infoBlock.AsSpan(stmInfoPos + 20)) : BinaryPrimitives.ReadInt32LittleEndian(infoBlock.AsSpan(stmInfoPos + 20));
 
         int dataAudioStart = dataOff + 0x20;
         int prefetchDataSize = PREFETCH_BLOCKS_PER_CHANNEL * channels * sampleBlkSize;
@@ -164,13 +205,14 @@ public static class BfstmFile
         int sampleDataRefFieldOff = stmInfoPos + 48 + 4;
         byte[] modifiedInfo = (byte[])infoBlock.Clone();
         int newSdRefValue = pdatOff + PDAT_HEADER_SIZE;
-        BitConverter.TryWriteBytes(modifiedInfo.AsSpan(sampleDataRefFieldOff), newSdRefValue);
+        if (isBigEndian) BinaryPrimitives.WriteInt32BigEndian(modifiedInfo.AsSpan(sampleDataRefFieldOff), newSdRefValue);
+        else BinaryPrimitives.WriteInt32LittleEndian(modifiedInfo.AsSpan(sampleDataRefFieldOff), newSdRefValue);
 
         using var ms = new MemoryStream(fileSize);
-        using var w = new BinaryWriter(ms, Encoding.UTF8);
+        using var w = new DataWriter(ms, isBigEndian);
 
         w.Write(Encoding.ASCII.GetBytes("FSTP"));
-        w.Write((ushort)0xFEFF); // BOM LE (bytes: FF FE)
+        w.Write((ushort)(isBigEndian ? 0xFEFF : 0xFEFF)); // In EndianWriter, Write(ushort 0xFEFF) will correctly output FE FF if big endian and FF FE if little endian
         w.Write((ushort)FILE_HEADER_SIZE);
         w.Write(0x00040000u); // version
         w.Write(fileSize);
@@ -190,7 +232,7 @@ public static class BfstmFile
         // PDAT block
         w.Write(Encoding.ASCII.GetBytes("PDAT"));
         w.Write(pdatBlockSize);
-        w.Write(1); // flag: 1 = Switch LE
+        w.Write(isBigEndian ? 0 : 1); // flag: 1 = Switch LE
         w.Write(0);
         w.Write(prefetchDataSize);
         w.Write(0);

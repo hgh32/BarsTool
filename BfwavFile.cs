@@ -32,13 +32,18 @@ public static class BfwavFile
     public static BfwavInfo ReadInfo(byte[] data)
     {
         using var ms = new MemoryStream(data);
-        using var reader = new BinaryReader(ms, Encoding.UTF8);
+        using var reader = new DataReader(ms);
 
         string magic = Encoding.ASCII.GetString(reader.ReadBytes(4));
         if (magic != "FWAV")
             throw new InvalidDataException("Not a BFWAV file.");
 
         ushort bom = reader.ReadUInt16();
+        if (bom == 0xFFFE)
+            reader.IsBigEndian = true;
+        else if (bom != 0xFEFF)
+            throw new InvalidDataException($"Unexpected BOM: 0x{bom:X4}");
+
         reader.ReadInt16(); // header size
         uint version = reader.ReadUInt32();
         reader.ReadInt32(); // file size
@@ -65,7 +70,7 @@ public static class BfwavFile
         return new BfwavInfo(sampleRate, sampleCount, channelCount, isLooped, loopStart, encoding);
     }
 
-    public static byte[] ConvertFromWav(byte[] wavData)
+    public static byte[] ConvertFromWav(byte[] wavData, bool isBigEndian = false)
     {
         var wavReader = new WaveReader();
         AudioData audioData;
@@ -73,13 +78,13 @@ public static class BfwavFile
             audioData = wavReader.Read(wavStream);
 
         var adpcm = audioData.GetFormat<GcAdpcmFormat>(new GcAdpcmParameters());
-        return BuildBfwav(adpcm);
+        return BuildBfwav(adpcm, isBigEndian);
     }
 
-    public static byte[] ConvertFromWav(string wavPath)
+    public static byte[] ConvertFromWav(string wavPath, bool isBigEndian = false)
     {
         byte[] wavData = File.ReadAllBytes(wavPath);
-        return ConvertFromWav(wavData);
+        return ConvertFromWav(wavData, isBigEndian);
     }
 
     public static byte[] ConvertToWav(byte[] bfwavData)
@@ -158,7 +163,7 @@ public static class BfwavFile
         return (0f, 0f);
     }
 
-    private static byte[] BuildBfwav(GcAdpcmFormat adpcm)
+    private static byte[] BuildBfwav(GcAdpcmFormat adpcm, bool isBigEndian)
     {
         int channelCount = adpcm.ChannelCount;
         int sampleCount = adpcm.SampleCount;
@@ -188,10 +193,10 @@ public static class BfwavFile
         int fileSize = dataOffset + dataBlockSize;
 
         using var ms = new MemoryStream(fileSize);
-        using var writer = new BinaryWriter(ms, Encoding.UTF8);
+        using var writer = new DataWriter(ms, isBigEndian);
 
         writer.Write(Encoding.ASCII.GetBytes("FWAV"));
-        writer.Write(BOM_LE);
+        writer.Write((ushort)(isBigEndian ? 0xFEFF : 0xFEFF));
         writer.Write((short)HEADER_SIZE);
         writer.Write(VERSION_10200);
         writer.Write(fileSize);

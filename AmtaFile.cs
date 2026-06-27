@@ -5,6 +5,7 @@ namespace BarsTool;
 public class AmtaFile
 {
     public string Name { get; set; } = string.Empty;
+    public bool IsBigEndian { get; set; } = false;
     public byte Version { get; set; } = 4;
     public int UnknownDataField { get; set; }
     public byte TrackType { get; set; }
@@ -26,23 +27,44 @@ public class AmtaFile
     public static AmtaFile Read(byte[] data, int offset, int length)
     {
         using var ms = new MemoryStream(data, offset, length);
-        using var reader = new BinaryReader(ms, Encoding.UTF8);
+        using var reader = new DataReader(ms);
 
         var amta = new AmtaFile();
 
-        uint magic = reader.ReadUInt32();
-        if (magic != 0x41544D41) // "AMTA"
+        string magic = Encoding.ASCII.GetString(reader.ReadBytes(4));
+        if (magic != "AMTA")
             throw new InvalidDataException("Not a valid AMTA block.");
 
-        reader.ReadUInt16(); // BOM (0xFEFF)
-        reader.ReadByte();   // padding
-        amta.Version = reader.ReadByte();
+        ushort bom = reader.ReadUInt16();
+        if (bom == 0xFFFE)
+        {
+            reader.IsBigEndian = true;
+            amta.IsBigEndian = true;
+        }
+        else if (bom != 0xFEFF)
+        {
+            throw new InvalidDataException($"Unexpected BOM: 0x{bom:X4}");
+        }
+
+        ushort version = reader.ReadUInt16();
+        amta.Version = (byte)(version >> 8);
 
         int totalSize = reader.ReadInt32();   // 0x08
         int dataOffset = reader.ReadInt32();  // 0x0C
         int markOffset = reader.ReadInt32();  // 0x10
-        int extOffset = reader.ReadInt32();   // 0x14
-        int strgOffset = reader.ReadInt32();  // 0x18
+        
+        int extOffset = 0;
+        int strgOffset = 0;
+        
+        if (amta.Version >= 3)
+        {
+            extOffset = reader.ReadInt32();   // 0x14
+            strgOffset = reader.ReadInt32();  // 0x18
+        }
+        else
+        {
+            strgOffset = reader.ReadInt32();  // 0x14
+        }
 
         long strgDataStart = strgOffset + 8;
 
@@ -92,27 +114,30 @@ public class AmtaFile
             amta.Markers.Add(marker);
         }
 
-        ms.Position = extOffset;
-        reader.ReadUInt32(); // "EXT_"
-        reader.ReadInt32();  // content size
-        int extCount = reader.ReadInt32();
-        for (int i = 0; i < extCount; i++)
+        if (amta.Version >= 3 && extOffset > 0)
         {
-            int nameOff = reader.ReadInt32();
-            int rawValue = reader.ReadInt32();
+            ms.Position = extOffset;
+            reader.ReadUInt32(); // "EXT_"
+            reader.ReadInt32();  // content size
+            int extCount = reader.ReadInt32();
+            for (int i = 0; i < extCount; i++)
+            {
+                int nameOff = reader.ReadInt32();
+                int rawValue = reader.ReadInt32();
 
-            long savedPos = ms.Position;
-            ms.Position = strgDataStart + nameOff;
-            byte[] nameBytes = ReadRawNullTerminated(reader);
-            ms.Position = savedPos;
+                long savedPos = ms.Position;
+                ms.Position = strgDataStart + nameOff;
+                byte[] nameBytes = ReadRawNullTerminated(reader);
+                ms.Position = savedPos;
 
-            amta.ExtEntries.Add(new AmtaExtEntry { NameBytes = nameBytes, RawValue = rawValue });
+                amta.ExtEntries.Add(new AmtaExtEntry { NameBytes = nameBytes, RawValue = rawValue });
+            }
         }
 
         return amta;
     }
 
-    private static byte[] ReadRawNullTerminated(BinaryReader reader)
+    private static byte[] ReadRawNullTerminated(DataReader reader)
     {
         var bytes = new List<byte>();
         byte b;
@@ -121,9 +146,9 @@ public class AmtaFile
         return bytes.ToArray();
     }
 
-    public byte[] Write() => BuildNew();
+    public byte[] Write() => BuildNew(IsBigEndian);
 
-    public byte[] BuildNew()
+    public byte[] BuildNew(bool isBigEndian = false)
     {
         byte[] nameBytes = Encoding.UTF8.GetBytes(Name);
 
@@ -158,7 +183,7 @@ public class AmtaFile
 
         // DATA section content
         var dataContent = new MemoryStream();
-        var dw = new BinaryWriter(dataContent, Encoding.UTF8);
+        var dw = new DataWriter(dataContent, isBigEndian);
         dw.Write((uint)0); // name offset always 0
         dw.Write(UnknownDataField);
         dw.Write(TrackType);
@@ -189,7 +214,7 @@ public class AmtaFile
 
         // MARK section content
         var markContent = new MemoryStream();
-        var mw = new BinaryWriter(markContent, Encoding.UTF8);
+        var mw = new DataWriter(markContent, isBigEndian);
         mw.Write(Markers.Count);
         for (int i = 0; i < Markers.Count; i++)
         {
@@ -202,7 +227,7 @@ public class AmtaFile
 
         // EXT_ section content
         var extContent = new MemoryStream();
-        var ew = new BinaryWriter(extContent, Encoding.UTF8);
+        var ew = new DataWriter(extContent, isBigEndian);
         ew.Write(ExtEntries.Count);
         for (int i = 0; i < ExtEntries.Count; i++)
         {
@@ -212,39 +237,42 @@ public class AmtaFile
         byte[] extBytes = extContent.ToArray();
 
         // Compute section offsets
-        int headerSize = 0x1C;
+        int headerSize = Version >= 3 ? 0x1C : 0x18;
         int dataSecStart = headerSize;
         int markSecStart = dataSecStart + 8 + dataBytes.Length;
         int extSecStart = markSecStart + 8 + markBytes.Length;
-        int strgSecStart = extSecStart + 8 + extBytes.Length;
+        int strgSecStart = Version >= 3 ? extSecStart + 8 + extBytes.Length : extSecStart;
         int totalSize = AlignUp(strgSecStart + 8 + strgData.Length, 4);
 
         using var ms = new MemoryStream();
-        using var writer = new BinaryWriter(ms, Encoding.UTF8);
+        using var writer = new DataWriter(ms, isBigEndian);
 
-        writer.Write(0x41544D41u); // "AMTA"
-        writer.Write((ushort)0xFEFF);
-        writer.Write((byte)0);
-        writer.Write(Version);
+        writer.Write(Encoding.ASCII.GetBytes("AMTA"));
+        writer.Write((ushort)(isBigEndian ? 0xFEFF : 0xFEFF));
+        writer.Write((ushort)(Version << 8));
         writer.Write(totalSize);
         writer.Write(dataSecStart);
         writer.Write(markSecStart);
-        writer.Write(extSecStart);
+        if (Version >= 3)
+            writer.Write(extSecStart);
         writer.Write(strgSecStart);
 
-        writer.Write(0x41544144u); // "DATA"
+        writer.Write(Encoding.ASCII.GetBytes("DATA"));
         writer.Write(dataBytes.Length);
         writer.Write(dataBytes);
 
-        writer.Write(0x4B52414Du); // "MARK"
+        writer.Write(Encoding.ASCII.GetBytes("MARK"));
         writer.Write(markBytes.Length);
         writer.Write(markBytes);
 
-        writer.Write(0x5F545845u); // "EXT_"
-        writer.Write(extBytes.Length);
-        writer.Write(extBytes);
+        if (Version >= 3)
+        {
+            writer.Write(Encoding.ASCII.GetBytes("EXT_"));
+            writer.Write(extBytes.Length);
+            writer.Write(extBytes);
+        }
 
-        writer.Write(0x47525453u); // "STRG"
+        writer.Write(Encoding.ASCII.GetBytes("STRG"));
         writer.Write(strgData.Length);
         writer.Write(strgData);
 

@@ -6,6 +6,7 @@ public class BarsListFile
 {
     public string Name { get; set; } = string.Empty;
     public ushort Version { get; set; } = 1;
+    public bool IsBigEndian { get; set; } = false;
     public List<string> Entries { get; set; } = [];
 
     public static BarsListFile Read(string path) => Read(File.ReadAllBytes(path));
@@ -13,17 +14,26 @@ public class BarsListFile
     public static BarsListFile Read(byte[] data)
     {
         using var ms = new MemoryStream(data);
-        using var reader = new BinaryReader(ms, Encoding.UTF8);
+        using var reader = new DataReader(ms);
 
-        uint magic = reader.ReadUInt32();
-        if (magic != 0x4C535241) // "ARSL"
+        string magic = Encoding.ASCII.GetString(reader.ReadBytes(4));
+        if (magic != "ARSL")
             throw new InvalidDataException("Not a valid BARSLIST file (expected ARSL magic).");
 
         ushort bom = reader.ReadUInt16();
-        if (bom != 0xFEFF)
-            throw new InvalidDataException($"Unexpected BOM: 0x{bom:X4}");
 
         var file = new BarsListFile();
+
+        if (bom == 0xFFFE)
+        {
+            reader.IsBigEndian = true;
+            file.IsBigEndian = true;
+        }
+        else if (bom != 0xFEFF)
+        {
+            throw new InvalidDataException($"Unexpected BOM: 0x{bom:X4}");
+        }
+
         file.Version = reader.ReadUInt16();
 
         uint nameOffset = reader.ReadUInt32();
@@ -46,10 +56,10 @@ public class BarsListFile
     public byte[] Write()
     {
         using var ms = new MemoryStream();
-        using var writer = new BinaryWriter(ms, Encoding.UTF8);
+        using var writer = new DataWriter(ms, IsBigEndian);
 
-        writer.Write(0x4C535241u); // "ARSL"
-        writer.Write((ushort)0xFEFF);
+        writer.Write(Encoding.ASCII.GetBytes("ARSL"));
+        writer.Write((ushort)(IsBigEndian ? 0xFEFF : 0xFEFF));
         writer.Write(Version);
 
         var stringTable = new MemoryStream();
@@ -85,7 +95,7 @@ public class BarsListFile
 
     public bool RemoveEntry(string name) => Entries.Remove(name);
 
-    private static string ReadNullTerminated(BinaryReader reader, long position)
+    private static string ReadNullTerminated(DataReader reader, long position)
     {
         long saved = reader.BaseStream.Position;
         reader.BaseStream.Position = position;
