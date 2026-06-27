@@ -214,7 +214,7 @@ public static class BfstmFile
         w.Write(Encoding.ASCII.GetBytes("FSTP"));
         w.Write((ushort)(isBigEndian ? 0xFEFF : 0xFEFF)); // In EndianWriter, Write(ushort 0xFEFF) will correctly output FE FF if big endian and FF FE if little endian
         w.Write((ushort)FILE_HEADER_SIZE);
-        w.Write(0x00040000u); // version
+        w.Write(0x00020100u); // version
         w.Write(fileSize);
         w.Write((ushort)2); // 2 blocks
         w.Write((ushort)0);
